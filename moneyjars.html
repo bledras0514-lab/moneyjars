@@ -490,10 +490,10 @@
   const STORAGE_KEY = 'moneyjars_v1';
 
   const CATS = [
-    { key:'youth',     label:'청년적금', mode:'fixed',   color:'#35618C', soft:'#DCE6EF', note:'청년도약계좌 자동이체 · 자본 자동반영' },
-    { key:'fixedcost', label:'고정비',   mode:'fixed',   color:'#B9812B', soft:'#F1E4C9', note:'구독료·교통비 등 매달 고정 지출' },
-    { key:'growth',    label:'성장(ISA)', mode:'pct', pct:25, color:'#1E6E52', soft:'#DCEDE3', note:'적금·고정비 뺀 나머지의 25% · ISA 자동투자·자동반영' },
-    { key:'saving',    label:'저축',     mode:'pct', pct:75, color:'#7A4A5C', soft:'#EFDDE3', note:'적금·고정비 뺀 나머지의 75% · 아래 버튼으로 자본에 반영' }
+    { key:'youth',     label:'청년적금', mode:'fixed',   color:'#35618C', soft:'#DCE6EF', note:'청년도약계좌 자동이체 · 완료 체크하면 자본에 더해짐' },
+    { key:'fixedcost', label:'고정비',   mode:'fixed',   color:'#B9812B', soft:'#F1E4C9', note:'구독료·교통비 등 · 완료 체크하면 자본(저축)에서 빠짐' },
+    { key:'growth',    label:'성장(ISA)', mode:'pct', pct:25, color:'#1E6E52', soft:'#DCEDE3', note:'적금·고정비 뺀 나머지의 25% · 완료 체크하면 자본에 더해짐' },
+    { key:'saving',    label:'저축',     mode:'pct', pct:75, color:'#7A4A5C', soft:'#EFDDE3', note:'적금·고정비 뺀 나머지의 75% · 완료 체크하면 자본에 더해짐' }
   ];
 
   const JAR_PATH = "M100,8 C122,8 138,18 138,34 C138,44 132,50 128,56 C160,72 182,108 182,150 C182,205 148,252 100,252 C52,252 18,205 18,150 C18,108 40,72 72,56 C68,50 62,44 62,34 C62,18 78,8 100,8 Z";
@@ -613,11 +613,8 @@
   function computeCapitalNow(){
     if (!state.capital) return { youthNow: 0, isaNow: 0, savingNow: 0, isaPrincipalSum: 0, total: 0 };
     const nowMs = Date.now();
-    const nowDate = new Date();
     const asOfMs = new Date(state.capital.asOf).getTime();
     const asOfDateStr = state.capital.asOf.slice(0, 10);
-    const asOfYM = state.capital.asOf.slice(0, 7);
-    const todayYM = ymOf(nowDate.getFullYear(), nowDate.getMonth());
     const YEAR_MS = 1000 * 60 * 60 * 24 * 365;
 
     let isaNow = (state.capital.isaBalance || 0) * Math.pow(1 + ISA_RATE, Math.max(0, nowMs - asOfMs) / YEAR_MS);
@@ -625,49 +622,27 @@
     let youthNow = state.capital.youthBalance || 0;
     let savingNow = state.capital.savingBalance || 0;
 
-    // 청년적금(자동이체) · 성장(ISA, 자동투자)는 수입 설정에 따라 매달 자동으로 쌓이는 것으로 계산
-    function ymToIdx(ym){ const p = ym.split('-').map(Number); return p[0] * 12 + (p[1] - 1); }
-    function idxToYm(idx){ return ymOf(Math.floor(idx / 12), ((idx % 12) + 12) % 12); }
-    const startIdx = ymToIdx(asOfYM);
-    const endIdx = ymToIdx(todayYM);
-    for (let idx = startIdx; idx <= endIdx; idx++) {
-      const ym = idxToYm(idx);
-      const active = activeSettingForYM(ym);
-      if (!active) continue;
-      const youthAlloc = Number(active.youthSaving) || 0;
-      const fixedAlloc = Number(active.fixedCost) || 0;
-      const remainder = Math.max(0, active.amount - youthAlloc - fixedAlloc);
-      const growthAlloc = remainder * 0.25;
-
-      youthNow += youthAlloc;
-
-      if (growthAlloc > 0) {
-        isaPrincipalSum += growthAlloc;
-        const monthStartMs = new Date(ym + '-01T00:00:00').getTime();
-        const contribMs = Math.max(monthStartMs, asOfMs);
-        const yrs = Math.max(0, nowMs - contribMs) / YEAR_MS;
-        isaNow += growthAlloc * Math.pow(1 + ISA_RATE, yrs);
-      }
-    }
-
-    // 저축은 "완료" 체크한 실제 기록(또는 잔액 반영 버튼)만 자본에 반영 — 자동 아님
-    const monthsSeen = new Set();
+    // 딱 하나의 규칙: 달력에서 "완료" 체크한 지출/이체만 자본을 움직인다.
+    // 청년적금·성장(ISA)·저축 = 그 계좌로 실제 들어간 돈 → 자본에 더해짐
+    // 고정비 = 실제로 나가서 없어진 돈 → 자본(저축)에서 빠짐 (수입 유무와 무관)
     Object.keys(state.entries).forEach(dateKey => {
-      if (dateKey < asOfDateStr) return;
-      monthsSeen.add(dateKey.slice(0, 7));
+      if (dateKey < asOfDateStr) return; // 자본 입력 이전 기록은 이미 잔액에 반영된 것으로 봄
       state.entries[dateKey].forEach(e => {
         if (e.isIncome || !e.checked) return;
-        if (e.category === 'saving') savingNow += Number(e.amount) || 0;
+        const amt = Number(e.amount) || 0;
+        if (e.category === 'youth') {
+          youthNow += amt;
+        } else if (e.category === 'saving') {
+          savingNow += amt;
+        } else if (e.category === 'growth') {
+          isaPrincipalSum += amt;
+          const entryMs = new Date(dateKey + 'T00:00:00').getTime();
+          const yrs = Math.max(0, nowMs - entryMs) / YEAR_MS;
+          isaNow += amt * Math.pow(1 + ISA_RATE, yrs);
+        } else if (e.category === 'fixedcost') {
+          savingNow -= amt;
+        }
       });
-    });
-
-    // 고정비가 그 달 배정액(수입 기준)보다 더 나갔으면 — 예: 수입 0원인데 고정비를 썼으면 —
-    // 그 초과분은 저축(자본)에서 빠져나간 것으로 계산
-    monthsSeen.forEach(ym => {
-      const s = computeCategoryStats(ym);
-      if (s.fixedcost && s.fixedcost.remaining < 0) {
-        savingNow += s.fixedcost.remaining; // remaining이 음수라 자동으로 차감됨
-      }
     });
 
     return { youthNow, isaNow, savingNow, isaPrincipalSum, total: youthNow + isaNow + savingNow };
@@ -863,7 +838,7 @@
           '<div class="mj-jar-amt mj-mono ' + (s.overflow ? 'over' : '') + '">' + formatWon(s.remaining) + '</div>' +
           '<div class="mj-jar-sub mj-mono">/ ' + formatWon(s.available) + '</div>' +
           '<div class="mj-jar-note">' + c.note + '</div>' +
-          (c.key === 'saving' ? '<button type="button" class="mj-jar-push" data-pushcat="' + c.key + '">잔액 자본에 반영</button>' : '') +
+          (c.key !== 'fixedcost' ? '<button type="button" class="mj-jar-push" data-pushcat="' + c.key + '">잔액 자본에 반영</button>' : '') +
         '</div>'
       );
     }).join('');
