@@ -547,6 +547,32 @@
       });
     });
   }
+  // 지출 기록 금액은 마이너스(환급·차감)도 입력 가능해야 해서 부호를 살려주는 버전
+  function toDigitsSigned(str){
+    const s = String(str || '');
+    const neg = /^\s*-/.test(s);
+    const digits = s.replace(/[^0-9]/g, '');
+    return (neg && digits) ? '-' + digits : digits;
+  }
+  function fmtPlainSigned(n){
+    if (n === '' || n == null || isNaN(Number(n))) return '';
+    const num = Number(n);
+    return (num < 0 ? '-' : '') + Math.abs(num).toLocaleString('ko-KR');
+  }
+  function getSignedAmt(id){
+    const el = document.getElementById(id);
+    if (!el) return 0;
+    const raw = toDigitsSigned(el.value);
+    return raw ? Number(raw) : 0;
+  }
+  function bindSignedAmtInput(id){
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const raw = toDigitsSigned(el.value);
+      el.value = raw ? fmtPlainSigned(raw) : '';
+    });
+  }
 
   async function loadState(){
     try {
@@ -554,16 +580,23 @@
       if (raw) {
         const parsed = JSON.parse(raw);
         const today = new Date();
-        return Object.assign({
-          incomeSetting: null,
+        const merged = Object.assign({
+          incomeSettings: {},
           capital: null,
           entries: {},
           view: { y: today.getFullYear(), m: today.getMonth() }
         }, parsed);
+        // 예전 방식(단일 incomeSetting) 데이터가 있으면 그 달 하나로 옮겨줌
+        if (parsed && parsed.incomeSetting && !merged.incomeSettings[parsed.incomeSetting.startYM]) {
+          const old = parsed.incomeSetting;
+          merged.incomeSettings[old.startYM] = { amount: old.amount, youthSaving: old.youthSaving, fixedCost: old.fixedCost };
+        }
+        delete merged.incomeSetting;
+        return merged;
       }
     } catch(e) { /* 저장된 데이터 없음 - 기본값 사용 */ }
     const today = new Date();
-    return { incomeSetting: null, capital: null, entries: {}, view: { y: today.getFullYear(), m: today.getMonth() } };
+    return { incomeSettings: {}, capital: null, entries: {}, view: { y: today.getFullYear(), m: today.getMonth() } };
   }
 
   async function saveState(){
@@ -573,19 +606,7 @@
   }
 
   function activeSettingForYM(ym){
-    const s = state.incomeSetting;
-    if (!s) return null;
-    if (s.periodType === 'once') return s.startYM === ym ? s : null;
-    if (s.periodType === 'range') return (ym >= s.startYM && ym <= s.endYM) ? s : null;
-    if (s.periodType === 'forever') return (ym >= s.startYM) ? s : null;
-    return null;
-  }
-
-  function describePeriod(s){
-    if (!s) return '아직 설정되지 않았어요';
-    if (s.periodType === 'once') return s.startYM + ' 한 달만 적용돼요';
-    if (s.periodType === 'range') return s.startYM + ' ~ ' + s.endYM + ' 기간에 적용돼요';
-    return s.startYM + '부터 계속 적용돼요 (변경 전까지)';
+    return (state.incomeSettings && state.incomeSettings[ym]) || null;
   }
 
   function computeCategoryStats(ym){
@@ -731,28 +752,40 @@
   /* ---------- 수입 카드 ---------- */
   function renderIncomeCard(){
     const container = document.getElementById('mjIncomeCard');
+    const ym = ymOf(state.view.y, state.view.m);
+    const ymLabel = state.view.y + '년 ' + (state.view.m + 1) + '월';
+
     if (incomeFormOpen) {
-      const s = state.incomeSetting || { amount:'', youthSaving: 400000, fixedCost:'', periodType:'forever', startYM: ymOf(state.view.y, state.view.m), endYM: ymOf(state.view.y, state.view.m) };
+      const existing = state.incomeSettings[ym];
+      let s;
+      if (existing) {
+        s = existing;
+      } else {
+        // 이 달에 설정이 없으면, 편의상 가장 최근 이전 달 설정값을 기본값으로 미리 채워줌 (저장 전까지는 이 달과 무관)
+        const priorKeys = Object.keys(state.incomeSettings).filter(k => k < ym).sort();
+        s = priorKeys.length ? state.incomeSettings[priorKeys[priorKeys.length - 1]] : { amount: '', youthSaving: 400000, fixedCost: '' };
+      }
       container.innerHTML =
         '<div class="mj-income-form">' +
-          '<label class="mj-field">월 수입 (원)<input type="text" inputmode="numeric" class="mj-amt-input" id="mjIncAmount" placeholder="예: 1,280,000" value="' + fmtPlain(s.amount) + '"></label>' +
+          '<div class="mj-label">' + ymLabel + ' 수입 (이 달에만 적용돼요)</div>' +
+          '<label class="mj-field">월 수입 (원, 없으면 0)<input type="text" inputmode="numeric" class="mj-amt-input" id="mjIncAmount" placeholder="예: 1,280,000 (없으면 0)" value="' + fmtPlain(s.amount) + '"></label>' +
           '<label class="mj-field">청년적금 (원 · 고정이체)<input type="text" inputmode="numeric" class="mj-amt-input" id="mjYouthAmount" placeholder="예: 400,000" value="' + fmtPlain(s.youthSaving != null ? s.youthSaving : 400000) + '"></label>' +
           '<label class="mj-field">월 고정비 (원 · 구독료·교통비 등)<input type="text" inputmode="numeric" class="mj-amt-input" id="mjFixedAmount" placeholder="예: 269,000" value="' + fmtPlain(s.fixedCost) + '"></label>' +
-          '<div class="mj-seg" id="mjPeriodSeg">' +
-            '<button type="button" class="mj-seg-btn ' + (s.periodType==='once'?'active':'') + '" data-p="once">이번달만</button>' +
-            '<button type="button" class="mj-seg-btn ' + (s.periodType==='range'?'active':'') + '" data-p="range">기간 설정</button>' +
-            '<button type="button" class="mj-seg-btn ' + ((!s.periodType||s.periodType==='forever')?'active':'') + '" data-p="forever">계속 적용</button>' +
-          '</div>' +
-          '<div class="mj-period-pickers" id="mjPeriodPickers">' +
-            '<label class="mj-field">시작월<input type="month" id="mjIncStart" value="' + s.startYM + '"></label>' +
-            '<label class="mj-field" id="mjIncEndField">종료월<input type="month" id="mjIncEnd" value="' + (s.endYM || s.startYM) + '"></label>' +
-          '</div>' +
-          '<button class="mj-btn-save" id="mjSaveIncomeBtn">저장</button>' +
+          '<button class="mj-btn-save" id="mjSaveIncomeBtn">' + ymLabel + '에 저장</button>' +
         '</div>';
-      attachIncomeFormEvents(s.periodType || 'forever');
       bindAmtInputs(['mjIncAmount', 'mjYouthAmount', 'mjFixedAmount']);
+      document.getElementById('mjSaveIncomeBtn').onclick = () => {
+        const amt = getAmt('mjIncAmount');
+        if (isNaN(amt) || amt < 0) { alert('0 이상의 수입 금액을 입력해주세요 (수입 없으면 0).'); return; }
+        const youthAmt = getAmt('mjYouthAmount');
+        const fixedAmt = getAmt('mjFixedAmount');
+        state.incomeSettings[ym] = { amount: amt, youthSaving: youthAmt, fixedCost: fixedAmt };
+        incomeFormOpen = false;
+        saveState();
+        renderIncomeCard();
+        renderJars();
+      };
     } else {
-      const ym = ymOf(state.view.y, state.view.m);
       const active = activeSettingForYM(ym);
       let breakdownHtml = '';
       if (active) {
@@ -764,62 +797,14 @@
       container.innerHTML =
         '<div class="mj-income-summary">' +
           '<div>' +
-            '<span class="mj-label">이 달 기준 반영 수입</span>' +
-            '<div class="mj-amount">' + (active ? formatWon(active.amount) : '설정된 수입 없음') + '</div>' +
-            '<div class="mj-period-desc">' + describePeriod(state.incomeSetting) + '</div>' +
+            '<span class="mj-label">' + ymLabel + ' 수입</span>' +
+            '<div class="mj-amount">' + (active ? formatWon(active.amount) : '이 달은 아직 설정 안 함') + '</div>' +
             breakdownHtml +
           '</div>' +
-          '<button class="mj-btn-edit" id="mjEditIncomeBtn">수입 수정</button>' +
+          '<button class="mj-btn-edit" id="mjEditIncomeBtn">' + (active ? '수입 수정' : '이 달 수입 설정') + '</button>' +
         '</div>';
       document.getElementById('mjEditIncomeBtn').onclick = () => { incomeFormOpen = true; renderIncomeCard(); };
     }
-  }
-
-  function attachIncomeFormEvents(initialType){
-    let curType = initialType;
-    updatePickerVisibility(curType);
-    document.querySelectorAll('#mjPeriodSeg .mj-seg-btn').forEach(b => {
-      b.onclick = () => {
-        curType = b.dataset.p;
-        document.querySelectorAll('#mjPeriodSeg .mj-seg-btn').forEach(x => x.classList.toggle('active', x === b));
-        updatePickerVisibility(curType);
-      };
-    });
-    document.getElementById('mjSaveIncomeBtn').onclick = () => {
-      const amt = getAmt('mjIncAmount');
-      if (!amt || amt <= 0) { alert('수입 금액을 입력해주세요.'); return; }
-      const youthAmt = getAmt('mjYouthAmount');
-      const fixedAmt = getAmt('mjFixedAmount');
-      const today = new Date();
-      const todayYM = ymOf(today.getFullYear(), today.getMonth());
-      const startYM = document.getElementById('mjIncStart').value || todayYM;
-      let endYM = document.getElementById('mjIncEnd').value || startYM;
-
-      let periodFields;
-      if (curType === 'once') {
-        periodFields = { periodType: 'once', startYM: todayYM, endYM: todayYM };
-      } else if (curType === 'range') {
-        let s0 = startYM, e0 = endYM;
-        if (e0 < s0) { const t = s0; s0 = e0; e0 = t; }
-        periodFields = { periodType: 'range', startYM: s0, endYM: e0 };
-      } else {
-        periodFields = { periodType: 'forever', startYM: startYM, endYM: null };
-      }
-      state.incomeSetting = Object.assign({ amount: amt, youthSaving: youthAmt, fixedCost: fixedAmt }, periodFields);
-      incomeFormOpen = false;
-      saveState();
-      renderIncomeCard();
-      renderJars();
-    };
-  }
-
-  function updatePickerVisibility(type){
-    const wrap = document.getElementById('mjPeriodPickers');
-    const endField = document.getElementById('mjIncEndField');
-    if (!wrap) return;
-    if (type === 'once') { wrap.style.display = 'none'; }
-    else if (type === 'range') { wrap.style.display = 'flex'; wrap.style.gap='10px'; if(endField) endField.style.display = 'flex'; }
-    else { wrap.style.display = 'flex'; wrap.style.gap='10px'; if(endField) endField.style.display = 'none'; }
   }
 
   /* ---------- 항아리 ---------- */
@@ -884,6 +869,7 @@
     if (m > 11) { m = 0; y++; }
     state.view = { y, m };
     selectedDate = null;
+    incomeFormOpen = false;
     saveState();
     renderIncomeCard();
     renderJars();
@@ -968,7 +954,7 @@
           '<span class="mj-chk-wrap">' + chkHtml + '</span>' +
           '<span class="mj-tag ' + typeClass + '">' + typeLabel + '</span>' +
           '<span class="mj-entry-cat" style="color:' + (cat ? cat.color : '#333') + '">' + (cat ? cat.label : '-') + '</span>' +
-          '<span class="mj-entry-amt">' + (e.isIncome ? '+' : '-') + formatWon(Math.abs(e.amount)) + '</span>' +
+          '<span class="mj-entry-amt">' + (e.isIncome ? ('+' + formatWon(Math.abs(e.amount))) : (e.amount >= 0 ? ('-' + formatWon(e.amount)) : ('+' + formatWon(-e.amount)))) + '</span>' +
           '<span class="mj-entry-memo">' + escapeHtml(e.memo || '') + '</span>' +
           '<button class="mj-mini-btn" data-edit="' + e.id + '">수정</button>' +
           '<button class="mj-mini-btn danger" data-del="' + e.id + '">삭제</button>' +
@@ -1036,14 +1022,14 @@
         '<div class="mj-cat-seg" id="mjCatSeg">' +
           CATS.map(c => '<button type="button" class="mj-cat-btn" data-cat="' + c.key + '" style="--dc:' + c.color + '">' + c.label + '</button>').join('') +
         '</div>' +
-        '<input type="text" inputmode="numeric" class="mj-amt-input" id="mjEntAmount" placeholder="금액" value="' + (editing ? fmtPlain(editing.amount) : '') + '">' +
+        '<input type="text" inputmode="numeric" class="mj-amt-input" id="mjEntAmount" placeholder="금액 (지출은 마이너스도 가능: 환급·차감)" value="' + (editing ? fmtPlainSigned(editing.amount) : '') + '">' +
         '<input type="text" id="mjEntMemo" placeholder="메모 (예: 월세, 당근판매 등)" value="' + (editing ? escapeHtml(editing.memo || '') : '') + '">' +
         (!isIncome ? '<label class="mj-done-check"><input type="checkbox" id="mjEntChecked" ' + (editing ? (editing.checked ? 'checked' : '') : 'checked') + '> 이미 지출 완료했어요</label>' : '') +
         '<div class="mj-form-actions"><button class="mj-btn-save" id="mjSaveEntryBtn">' + (editing ? '수정 저장' : '저장') + '</button></div>' +
       '</div>';
 
     let selectedCat = editing ? editing.category : 'fixedcost';
-    bindAmtInputs(['mjEntAmount']);
+    bindSignedAmtInput('mjEntAmount');
     function markCatButtons(){
       wrap.querySelectorAll('.mj-cat-btn').forEach(b => b.classList.toggle('active', b.dataset.cat === selectedCat));
     }
@@ -1056,10 +1042,11 @@
     });
 
     document.getElementById('mjSaveEntryBtn').onclick = () => {
-      const amt = getAmt('mjEntAmount');
+      const amt = getSignedAmt('mjEntAmount');
       const memo = document.getElementById('mjEntMemo').value.trim();
-      if (!amt || amt <= 0) { alert('금액을 입력해주세요.'); return; }
       const isInc = entryFormType === 'income';
+      if (isNaN(amt)) { alert('금액을 입력해주세요.'); return; }
+      if (isInc && amt <= 0) { alert('수입 금액은 0보다 커야 해요.'); return; }
       const checkedBox = document.getElementById('mjEntChecked');
       const checkedVal = isInc ? true : (checkedBox ? checkedBox.checked : true);
 
@@ -1081,7 +1068,7 @@
   document.getElementById('mjResetBtn').onclick = async () => {
     if (!confirm('모든 기록과 설정이 삭제돼요. 계속할까요?')) return;
     const today = new Date();
-    state = { incomeSetting: null, capital: null, entries: {}, view: { y: today.getFullYear(), m: today.getMonth() } };
+    state = { incomeSettings: {}, capital: null, entries: {}, view: { y: today.getFullYear(), m: today.getMonth() } };
     incomeFormOpen = true;
     capitalFormOpen = true;
     selectedDate = null;
@@ -1093,8 +1080,9 @@
   (async function init(){
     state = await loadState();
     if (!state.entries) state.entries = {};
+    if (!state.incomeSettings) state.incomeSettings = {};
     if (!state.view) { const t = new Date(); state.view = { y: t.getFullYear(), m: t.getMonth() }; }
-    incomeFormOpen = !state.incomeSetting;
+    incomeFormOpen = !activeSettingForYM(ymOf(state.view.y, state.view.m));
     capitalFormOpen = !state.capital;
     renderCapitalCard();
     renderIncomeCard();
